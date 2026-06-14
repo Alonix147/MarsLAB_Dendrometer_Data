@@ -24,8 +24,34 @@ def load_data():
     for col in freq_cols + induct_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
         df.loc[(df[col] == -1) | (df[col] == 0), col] = pd.NA
-    
-    return df, freq_cols, induct_cols
+        if col in freq_cols:
+            df.loc[df[col] < 100, col] = pd.NA
+def clean_spikes(sensor_data, cols, window=5, spike_threshold=4.0, max_spike_fraction=0.05, min_valid_fraction=0.5):
+    cleaned = sensor_data.copy()
+    cleaned = cleaned.sort_values('datetime')
+
+    for col in cols:
+        series = cleaned[['datetime', col]].copy()
+        valid_count = series[col].notna().sum()
+        total_count = len(series)
+
+        if valid_count < 10 or valid_count / total_count < min_valid_fraction:
+            continue
+
+        series = series.set_index('datetime')[col].astype('float64')
+        rolling_median = series.rolling(window=window, center=True, min_periods=1).median()
+        rolling_std = series.rolling(window=window, center=True, min_periods=1).std().fillna(0)
+        rolling_std = rolling_std.replace(0, 1e-6)
+
+        spikes = (series - rolling_median).abs() > (spike_threshold * rolling_std)
+        spike_fraction = spikes.sum() / valid_count if valid_count else 0
+
+        if 0 < spike_fraction <= max_spike_fraction:
+            cleaned_series = series.mask(spikes)
+            cleaned_series = cleaned_series.interpolate(method='time', limit=window, limit_direction='both')
+            cleaned[col] = cleaned_series.values
+
+    return cleaned
 
 df, freq_cols, induct_cols = load_data()
 
@@ -75,6 +101,8 @@ if selected_sensors:
     # Filter by time range
     sensor_data = sensor_data[(sensor_data['datetime'].dt.date >= start_date) & (sensor_data['datetime'].dt.date <= end_date)]
     
+    sensor_data = clean_spikes(sensor_data, selected_freq_cols + selected_induct_cols)
+    
     # Calculate inductance change in PPM relative to first measurement in selected period
     ppm_cols = []
     if not sensor_data.empty:
@@ -82,10 +110,11 @@ if selected_sensors:
             ppm_col_name = f'Induct_Change_PPM_Sensor_{sensor_id}'
             ppm_cols.append(ppm_col_name)
             
-            # Get first non-NaN value
-            first_valid_value = sensor_data[induct_col].dropna().iloc[0] if len(sensor_data[induct_col].dropna()) > 0 else None
-            
-            if first_valid_value is not None and first_valid_value != 0:
+            # Get first real nonzero value after any NaNs and zeros
+            valid_values = sensor_data[induct_col].loc[lambda x: x.notna() & (x != 0)]
+            first_valid_value = valid_values.iloc[0] if len(valid_values) > 0 else None
+
+            if first_valid_value is not None:
                 # Calculate PPM change: ((current - first) / first) * 1e6
                 sensor_data[ppm_col_name] = ((sensor_data[induct_col] - first_valid_value) / first_valid_value) * 1e6
             else:
