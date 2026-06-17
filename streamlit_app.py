@@ -9,10 +9,11 @@ def load_data():
     # Read the CR1000X data file, skipping metadata rows (rows 0, 2, 3)
     # Row 1 contains the column names (TIMESTAMP, RECORD, etc.)
     df = pd.read_csv('CR1000X_Hazeva_Lys_DendroData.dat', skiprows=[0, 2, 3])
-    
-    # Convert TIMESTAMP column to datetime
-    df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
+
+    # Convert TIMESTAMP column to datetime (coerce errors) and ensure proper dtype
+    df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'], errors='coerce')
     df = df.rename(columns={'TIMESTAMP': 'datetime'})
+    df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
     
     # Extract frequency columns (Dend_freq 1-12, columns O-Z)
     freq_cols = [col for col in df.columns if col.startswith('Dend_freq')]
@@ -26,6 +27,9 @@ def load_data():
         df.loc[(df[col] == -1) | (df[col] == 0), col] = pd.NA
         if col in freq_cols:
             df.loc[df[col] < 100, col] = pd.NA
+
+    return df, freq_cols, induct_cols
+
 def clean_spikes(sensor_data, cols, window=5, spike_threshold=4.0, max_spike_fraction=0.05, min_valid_fraction=0.5):
     cleaned = sensor_data.copy()
     cleaned = cleaned.sort_values('datetime')
@@ -53,6 +57,8 @@ def clean_spikes(sensor_data, cols, window=5, spike_threshold=4.0, max_spike_fra
 
     return cleaned
 
+
+
 df, freq_cols, induct_cols = load_data()
 
 st.title("Dendrometer Data Visualization")
@@ -68,26 +74,29 @@ with st.sidebar:
     
     st.subheader("Time Range")
     # Default to 1 week ago from the latest data point
-    default_start = (pd.to_datetime(df['datetime'].max()).date() - pd.Timedelta(days=7))
+    default_start = (pd.to_datetime(df['datetime'].max()) - pd.Timedelta(days=7)).date()
     start_date = st.date_input("Start Date", value=default_start)
     
     range_type = st.radio("Range Type", ["Fixed Period", "Custom Date"])
     
     if range_type == "Fixed Period":
         period_option = st.selectbox("Select Period", ["1 Day", "5 Days", "1 Week", "2 Weeks", "1 Month"])
+        # Ensure date arithmetic uses pandas Timestamp
         if period_option == "1 Day":
-            end_date = start_date + pd.Timedelta(days=1)
+            end_date = (pd.to_datetime(start_date) + pd.Timedelta(days=1)).date()
         elif period_option == "5 Days":
-            end_date = start_date + pd.Timedelta(days=5)
+            end_date = (pd.to_datetime(start_date) + pd.Timedelta(days=5)).date()
         elif period_option == "1 Week":
-            end_date = start_date + pd.Timedelta(weeks=1)
+            end_date = (pd.to_datetime(start_date) + pd.Timedelta(weeks=1)).date()
         elif period_option == "2 Weeks":
-            end_date = start_date + pd.Timedelta(weeks=2)
+            end_date = (pd.to_datetime(start_date) + pd.Timedelta(weeks=2)).date()
         elif period_option == "1 Month":
-            end_date = (start_date + pd.DateOffset(months=1)).date()
+            end_date = (pd.to_datetime(start_date) + pd.DateOffset(months=1)).date()
         st.write(f"**Time Range:** {start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}")
     else:  # Custom Date
         end_date = st.date_input("End Date", value=pd.to_datetime(df['datetime'].max()).date(), min_value=start_date)
+
+    # PPM smoothing removed per user request
 
 # Filter data for selected sensors and time range
 if selected_sensors:
@@ -119,6 +128,8 @@ if selected_sensors:
                 sensor_data[ppm_col_name] = ((sensor_data[induct_col] - first_valid_value) / first_valid_value) * 1e6
             else:
                 sensor_data[ppm_col_name] = pd.NA
+
+        # PPM smoothing step removed; raw PPM columns retained
 else:
     sensor_data = pd.DataFrame()  # Empty if none selected
     ppm_cols = []
@@ -159,7 +170,7 @@ if not sensor_data.empty:
                 hovermode='x unified',
                 height=500
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.write("No frequency data available for selected sensors in this time range")
     
@@ -187,7 +198,7 @@ if not sensor_data.empty:
                 hovermode='x unified',
                 height=500
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.write("No inductance data available for selected sensors in this time range")
     
@@ -215,13 +226,14 @@ if not sensor_data.empty:
                 hovermode='x unified',
                 height=500
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.write("No inductance change data available for selected sensors in this time range")
     
     # Display data summary
     st.subheader("Data Summary")
-    summary_data = sensor_data.describe().round(6)
+    # Describe only numeric columns to avoid object/Timestamp serialization issues
+    summary_data = sensor_data.select_dtypes(include='number').describe().round(6)
     st.dataframe(summary_data)
 else:
     st.write("Please select at least one sensor.")
